@@ -1,0 +1,161 @@
+name: Build
+
+on: [push]
+
+# Declare default permissions as read only.
+permissions: read-all
+
+jobs:
+
+  # -- TESTS ------------------------------------------------------------------
+  unit-tests:
+    name: Unit-Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Harden GitHub Actions Runner
+        uses: step-security/harden-runner@6dacdfc16caa5ebd987908a44ab5b425193385f6
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            agent.api.stepsecurity.io:443
+            api.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+            proxy.golang.org:443
+            storage.googleapis.com:443
+            sum.golang.org:443
+
+      - name: Checkout
+        uses: actions/checkout@83b7061638ee4956cf7545a6f7efe594e5ad0247 # v3.5.1
+
+      - name: Setup Go
+        uses: actions/setup-go@6edd4406fa81c3da01a34fa6f6343087c207a568 # v3.5.0
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: true
+
+      - name: Build the Go app
+        run: make go-build
+
+      - name: Run the tests
+        run: make go-test
+
+      - name: Save Code Coverage
+        uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+        with:
+          name: code-coverage
+          path: coverage.out
+
+  # -- SONARCLOUD -------------------------------------------------------------
+  code-quality:
+    name : Code Quality
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - name: Harden GitHub Actions Runner
+        uses: step-security/harden-runner@6dacdfc16caa5ebd987908a44ab5b425193385f6
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@83b7061638ee4956cf7545a6f7efe594e5ad0247 # v3.5.1
+
+      - name: Download Code Coverage
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a # v3.0.2
+        with:
+          name: code-coverage
+
+      - name: SonarCloud Scan
+        uses: sonarsource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # -- SAST SCAN --------------------------------------------------------------
+  code-security:
+    name: Code Security
+    runs-on: ubuntu-latest
+    needs:
+      - unit-tests
+    # Skip any PR created by dependabot to avoid permission issues
+    if: (github.actor != 'dependabot[bot]')
+
+    steps:
+      - name: Harden GitHub Actions Runner
+        uses: step-security/harden-runner@6dacdfc16caa5ebd987908a44ab5b425193385f6
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            auth.docker.io:443
+            docker.io:443
+            github.com:443
+            golang.org:443
+            nvd.nist.gov:443
+            objects.githubusercontent.com:443
+            osv-vulnerabilities.storage.googleapis.com:443
+            production.cloudflare.docker.com:443
+            proxy.golang.org:443
+            pypi.org:443
+            registry-1.docker.io:443
+            storage.googleapis.com:443
+            sum.golang.org:443
+
+      - name: Checkout
+        uses: actions/checkout@83b7061638ee4956cf7545a6f7efe594e5ad0247 # v3.5.1
+
+      - name: Setup Go
+        uses: actions/setup-go@6edd4406fa81c3da01a34fa6f6343087c207a568 # v3.5.0
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+          cache: true
+
+      - name: Build Go app
+        run: make go-build
+
+      - name: Perform Scan
+        uses: ShiftLeftSecurity/scan-action@master
+
+        env:
+          WORKSPACE: https://github.com/${{ github.repository }}/blob/${{ github.sha }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          SCAN_ANNOTATE_PR: true
+
+      - name: Save the reports
+        uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+        with:
+          name: reports
+          path: reports
+
+  # -- PRE-RELEASE ------------------------------------------------------------
+  pre-release:
+    name: Pre-Release
+    runs-on: ubuntu-latest
+    needs:
+      - code-quality
+      - code-security
+    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Harden GitHub Actions Runner
+        uses: step-security/harden-runner@6dacdfc16caa5ebd987908a44ab5b425193385f6
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@83b7061638ee4956cf7545a6f7efe594e5ad0247 # v3.5.1
+        with:
+          ref: 'main' # Force checkout of main branch to avoid cache from previous jobs
+          persist-credentials: false
+
+      - name: Prepare Release
+        uses: cycjimmy/semantic-release-action@8e58d20d0f6c8773181f43eb74d6a05e3099571d # v3.4.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
